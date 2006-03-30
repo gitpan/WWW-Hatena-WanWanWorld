@@ -1,15 +1,34 @@
+package WWW::Hatena::WanWanWorld::position;
+use strict;
+use warnings;
+
+sub lat { &WWW::Hatena::Scraper::_getset; }
+sub long { &WWW::Hatena::Scraper::_getset; }
+sub position {
+    my $self = shift;
+    if (@_ == 2) {
+        $self->lat(shift);
+        $self->long(shift);
+    } elsif (@_ != 0) {
+        croak ("Number of parameters are invalid");
+    }
+    return ($self->lat,$self->long);
+}
+
 package WWW::Hatena::WanWanWorld;
 
 use strict;
 use warnings;
 use vars qw($VERSION);
-$VERSION = '0.01';
+$VERSION = '0.02';
 
-use base qw(WWW::Hatena::Scraper);
+use base qw(WWW::Hatena::Scraper WWW::Hatena::WanWanWorld::position);
 use Digest::MD5 qw(md5_base64);
 use JSON;
 use Location::GeoTool;
-use Jcode;
+use Encode;
+
+Encode::Alias::define_alias( qr/^euc$/i => '"euc-jp"' );
 
 sub new {
     my $self = shift;
@@ -29,14 +48,14 @@ sub new {
         $self->user;
     };
     $opts{user_check_url} = "http://world.hatelabo.jp/";
+    my $charcode = delete $opts{'charcode'} || 'encode';
 
-    $self = $self->SUPER::new(%opts);
+    $self = $self->WWW::Hatena::Scraper::new(%opts);
     $self->logout_url("http://world.hatelabo.jp/logout");
+    $self->charcode($charcode);
     return $self;
 }
 
-sub lat { &WWW::Hatena::Scraper::_getset; }
-sub long { &WWW::Hatena::Scraper::_getset; }
 sub friends { &WWW::Hatena::Scraper::_getset; }
 sub arounds { &WWW::Hatena::Scraper::_getset; }
 sub markers { &WWW::Hatena::Scraper::_getset; }
@@ -44,28 +63,23 @@ sub voice { &WWW::Hatena::Scraper::_getset; }
 sub charcode { &WWW::Hatena::Scraper::_getset; }
 sub json {
     my $self = shift;
-    $self->{'json'} ||= JSON->new(unmapping => 1, quotapos => 1 , barekey => 1); 
-}
-
-sub position {
-    my $self = shift;
-    if (@_ == 2) {
-        $self->lat(shift);
-        $self->long(shift);
-    } elsif (@_ != 0) {
-        croak ("Number of parameters are invalid");
-    }
-    return ($self->lat,$self->long);
+    $self->{'json'} ||= JSON->new(unmapping => 1, quotapos => 1 , barekey => 1,utf8 => $self->charcode eq 'encode' ? 1: 0); 
 }
 
 sub get_around {
     my $self = shift;
     my $km = shift;
     my $rkm = md5_base64($self->rk);
-    my $voice = $self->encoded_voice();
+    my $voice = $self->encoded_voice() || '';
     my ($lat,$long,$minY,$minX,$maxY,$maxX) = $self->get_minmax($km);
     my $content = "z=1&lat=${long}&lng=${lat}&voice=${voice}&rkm=${rkm}&minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}&_=";
-    $self->arounds($self->json->jsonToObj($self->get_content('http://world.hatelabo.jp/position',$content)));
+    my $json = $self->json->jsonToObj($self->get_content('http://world.hatelabo.jp/position',$content));
+    for my $dog (map { $json->{$_} } keys %$json) {
+        my $voice = $dog->{'voice'};
+        $voice = encode($self->charcode,$voice) if ($self->charcode ne 'encode');
+        $dog->{'voice'} = $voice || '';
+    }
+    $self->arounds($json);
 }
 
 sub get_friend {
@@ -122,9 +136,15 @@ sub get_minmax {
 
 sub encoded_voice {
     my $self = shift;
-    my $voice = Jcode->new($self->voice || '',$self->charcode)->utf8;
-    $voice =~ s/([^0-9A-Za-z_ ])/'%'.unpack('H2',$1)/ge;
-    $voice =~ s/\s/+/g;
+
+    my $voice = $self->voice;
+    $voice = decode($self->charcode,$voice) if ($self->charcode ne 'encode');
+    Encode::_utf8_off($voice);
+
+    if ($voice) {
+        $voice =~ s/([^0-9A-Za-z_ ])/'%'.unpack('H2',$1)/ge;
+        $voice =~ s/\s/+/g;
+    }
     return $voice;
 }
 
@@ -180,13 +200,21 @@ Wan Wan World from perl.
 
 my $www = WWW::Hatena::Scraper->new([ %opts ]);
 
-You can set the C<ua> option in constructor.
+You can set the C<ua> and C<charset> option in constructor.
 
 =over 8
 
 =item ua
 
 If you want to reuse I<LWP::UserAgent> object, set it to this option.
+
+=item ua
+
+You C<MUST> set this option if you want to use multi-byte string as binary data.
+(Even if you use UTF-8!)
+With this, you specify the character code using in script.
+If you use this module under "use utf8;" or "use encoding foobar;" environment,
+you C<MUST NOT> set this value.
 
 =back
 
@@ -238,12 +266,6 @@ Set or get longitude of user's(dog's?) position.
 =item $www->B<voice>
 
 Set or get user's(dog's?) voice to show.
-
-=item $www->B<charcode>($charcode)
-
-Set character code of voice string.
-Module detect character code automatically, but sometimes may failed.
-You want to make it clear, use set character code to this method.
 
 =item $www->B<get_around>($km)
 
@@ -308,11 +330,16 @@ Returns the last error text.
 
 =head1 NOTICE
 
-Area detectation(calcurating minimum and maximum longitude/latitude) logic
+=item From 0.02, charcode setting is not optional, and change from method to
+constructor option.
+You MUST or MUST NOT set this option, decides whether you use multibyte character
+as binary (Legacy way) or string (After perl 5.8, under use utf8; or use encoding;).
+
+=item Area detectation(calcurating minimum and maximum longitude/latitude) logic
 of B<get_around> method and B<get_marker> method is just poor hacked.
 It is only work around in Japan, typically not worked near the pole.
 
-All raw objects translated from JSON has mistakes.
+=item All raw objects translated from JSON has mistakes.
 In these object, attribute B<lat> means B<longitude>, B<lng> means B<latitude>.
 This is error of Hatena itself.
 Take care.
